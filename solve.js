@@ -208,7 +208,14 @@ function parseFrontMatter(text) {
 }
 
 // --- MARKDOWN ---
-const BLANK = /^[ \t]*$/;
+function isBlank(line) {
+  const len = line.length;
+  for (let i = 0; i < len; i++) {
+    const c = line.charCodeAt(i);
+    if (c !== 32 && c !== 9) return false;
+  }
+  return true;
+}
 const FENCE_OPEN = /^```([A-Za-z0-9_+-]*)[ \t]*$/;
 const FENCE_CLOSE = /^```[ \t]*$/;
 const HEADING = /^(#{1,6})[ \t]+(.*?)[ \t]*$/;
@@ -227,14 +234,28 @@ function headingOf(line) {
 function endsParagraph(line) {
   if (line.length === 0) return true;
   const c = line.charCodeAt(0);
-  if (c === 32 || c === 9) return BLANK.test(line);
-  if (c === 96) return FENCE_OPEN.test(line);
+  if (c === 32 || c === 9) return isBlank(line);
+  if (c === 96) return line.startsWith('```') && FENCE_OPEN.test(line);
   if (c === 35) return headingOf(line) !== null;
-  if (c === 45 || c === 42) return HR.test(line);
+  if (c === 45 || c === 42) return (line.startsWith('---') || line.startsWith('***')) && HR.test(line);
   return false;
 }
 
-const trimLine = (line) => line.replace(/^[ \t]+|[ \t]+$/g, '');
+function trimLine(s) {
+  let start = 0;
+  let end = s.length;
+  while (start < end) {
+    const c = s.charCodeAt(start);
+    if (c === 32 || c === 9) start++;
+    else break;
+  }
+  while (end > start) {
+    const c = s.charCodeAt(end - 1);
+    if (c === 32 || c === 9) end--;
+    else break;
+  }
+  return start === 0 && end === s.length ? s : s.slice(start, end);
+}
 
 function lex(src) {
   const lines = src.split('\n');
@@ -243,7 +264,7 @@ function lex(src) {
   const numLines = lines.length;
   while (i < numLines) {
     const line = lines[i];
-    if (line.length === 0 || BLANK.test(line)) {
+    if (line.length === 0 || isBlank(line)) {
       i++;
       continue;
     }
@@ -346,6 +367,7 @@ function findSingleStar(s, from) {
 }
 
 function inline(s, env) {
+  if (!/[\\`\*\[&<>"']/.test(s)) return s;
   let out = '';
   let i = 0;
   const len = s.length;
@@ -640,9 +662,16 @@ function renderNodes(nodes, scope, ctx, depth) {
         const xs = lookup(scope, n.path);
         if (!Array.isArray(xs)) break;
         const xLen = xs.length;
+        if (xLen === 0) break;
+        const loop = { index: 0, first: false, last: false, length: xLen };
+        const vars = { [n.name]: null, loop };
+        const loopScope = { vars, parent: scope };
         for (let k = 0; k < xLen; k++) {
-          const vars = { [n.name]: xs[k], loop: { index: k + 1, first: k === 0, last: k === xLen - 1, length: xLen } };
-          out += renderNodes(n.body, { vars, parent: scope }, ctx, depth);
+          vars[n.name] = xs[k];
+          loop.index = k + 1;
+          loop.first = k === 0;
+          loop.last = k === xLen - 1;
+          out += renderNodes(n.body, loopScope, ctx, depth);
         }
         break;
       }
