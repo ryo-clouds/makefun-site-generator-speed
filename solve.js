@@ -28,7 +28,12 @@ function escapeHtml(text) {
   return text.replace(/[&<>"']/g, (c) => ESCAPES_MAP[c]);
 }
 
+
+const SLUG_CACHE = new Map();
 function slugify(text) {
+  const cached = SLUG_CACHE.get(text);
+  if (cached !== undefined) return cached;
+
   let plain = text;
   let hasNonAscii = false;
   for (let i = 0; i < text.length; i++) {
@@ -57,7 +62,9 @@ function slugify(text) {
     out += keep;
   }
   out = out.slice(0, SLUG_MAX).replace(/-+$/, '');
-  return out === '' ? 'untitled' : out;
+  const res = out === '' ? 'untitled' : out;
+  SLUG_CACHE.set(text, res);
+  return res;
 }
 
 function uniqueSlug(slug, taken) {
@@ -173,18 +180,29 @@ function valueOf(key, raw) {
 }
 
 function parseFrontMatter(text) {
-  const lines = text.split('\n');
-  if (lines[0] !== '---') return { error: 'no front matter' };
+  if (!text.startsWith('---\n')) {
+    if (text === '---') return { error: 'the front matter is not closed' };
+    return { error: 'no front matter' };
+  }
+  let lineStart = 4;
   let close = -1;
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i] === '---') {
-      close = i;
+  const lines = ['---'];
+  const len = text.length;
+  while (lineStart < len) {
+    const nl = text.indexOf('\n', lineStart);
+    const lineEnd = nl === -1 ? len : nl;
+    const line = text.slice(lineStart, lineEnd);
+    if (line === '---') {
+      close = lineEnd;
       break;
     }
+    lines.push(line);
+    if (nl === -1) break;
+    lineStart = nl + 1;
   }
   if (close === -1) return { error: 'the front matter is not closed' };
   const data = {};
-  for (let i = 1; i < close; i++) {
+  for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
     if (/^[ \t]*$/.test(line) || line.startsWith('#')) continue;
     const colonIdx = line.indexOf(':');
@@ -204,7 +222,7 @@ function parseFrontMatter(text) {
     data[key] = v.value;
   }
   if (!Object.hasOwn(data, 'title')) return { error: 'no title' };
-  return { data, body: lines.slice(close + 1).join('\n') };
+  return { data, body: text.slice(close + 1) };
 }
 
 // --- MARKDOWN ---
@@ -483,10 +501,8 @@ function renderMarkdown(src, env) {
       }
       case 'code': {
         const cls = t.lang === '' ? '' : ` class="language-${escapeHtml(t.lang)}"`;
-        let codeLines = '';
-        const lines = t.lines;
-        for (let j = 0; j < lines.length; j++) codeLines += escapeHtml(lines[j]) + '\n';
-        blocks.push(`<pre><code${cls}>${codeLines}</code></pre>\n`);
+        const codeContent = t.lines.length === 0 ? '' : escapeHtml(t.lines.join('\n') + '\n');
+        blocks.push(`<pre><code${cls}>${codeContent}</code></pre>\n`);
         break;
       }
       case 'hr':
@@ -612,18 +628,25 @@ function parseTemplate(name, src) {
   return root.body;
 }
 
+
 function lookup(scope, path) {
   let s = scope;
   const p0 = path[0];
-  while (s !== null && !Object.hasOwn(s.vars, p0)) s = s.parent;
+  while (s !== null) {
+    if (s.vars[p0] !== undefined || Object.hasOwn(s.vars, p0)) break;
+    s = s.parent;
+  }
   if (s === null) return undefined;
   let v = s.vars[p0];
   for (let k = 1; k < path.length; k++) {
-    if (v === null || typeof v !== 'object' || !Object.hasOwn(v, path[k])) return undefined;
-    v = v[path[k]];
+    if (v === null || typeof v !== 'object') return undefined;
+    const prop = path[k];
+    if (v[prop] === undefined && !Object.hasOwn(v, prop)) return undefined;
+    v = v[prop];
   }
   return v;
 }
+
 
 function textOf(v) {
   if (typeof v === 'string') return v;
@@ -794,32 +817,39 @@ function collections(b) {
 
 function tags(b) {
   const bySlug = new Map();
-  const ownTags = (s) => {
-    const seen = new Set();
-    return (s.data.tags ?? []).filter((name) => {
-      const slug = slugify(name);
-      return !seen.has(slug) && seen.add(slug);
-    });
-  };
-  for (const p of b.posts) {
+  for (let i = 0; i < b.posts.length; i++) {
+    const p = b.posts[i];
+    const rawTags = p.data.tags;
     p.tagRefs = [];
-    for (const name of ownTags(p)) {
+    if (!rawTags || rawTags.length === 0) continue;
+    const seen = new Set();
+    for (let j = 0; j < rawTags.length; j++) {
+      const name = rawTags[j];
       const slug = slugify(name);
+      if (seen.has(slug)) continue;
+      seen.add(slug);
       let tag = bySlug.get(slug);
       if (!tag) {
-        tag = { name, slug, url: `${b.base}/tags/${slug}/`, posts: [] };
+        tag = { name, slug, url: b.base + "/tags/" + slug + "/", posts: [] };
         bySlug.set(slug, tag);
       }
       tag.posts.push(p);
       p.tagRefs.push(tag);
     }
   }
-  for (const s of b.sources) {
-    if (!s.post) {
-      s.tagRefs = ownTags(s).map((name) => {
-        const slug = slugify(name);
-        return bySlug.get(slug) ?? { name, slug, url: '', posts: [] };
-      });
+  for (let i = 0; i < b.sources.length; i++) {
+    const s = b.sources[i];
+    if (s.post) continue;
+    const rawTags = s.data.tags;
+    s.tagRefs = [];
+    if (!rawTags || rawTags.length === 0) continue;
+    const seen = new Set();
+    for (let j = 0; j < rawTags.length; j++) {
+      const name = rawTags[j];
+      const slug = slugify(name);
+      if (seen.has(slug)) continue;
+      seen.add(slug);
+      s.tagRefs.push(bySlug.get(slug) ?? { name, slug, url: "", posts: [] });
     }
   }
   b.tags = [...bySlug.values()].sort((x, y) => y.posts.length - x.posts.length || byCodeUnits(x.slug, y.slug));
